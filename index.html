@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>云端计数器 · Cloudflare KV</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, #0f172a 0%, #1e293b 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: #e2e8f0;
+  }
+  .card {
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    padding: 40px 36px 32px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  }
+  h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+  .subtitle { font-size: 13px; color: #94a3b8; margin: 4px 0 28px; }
+  .value-box {
+    text-align: center;
+    padding: 28px 16px;
+    border-radius: 16px;
+    background: rgba(246, 130, 31, 0.12);
+    border: 1px dashed rgba(246, 130, 31, 0.4);
+    margin-bottom: 20px;
+  }
+  .value-label { font-size: 13px; color: #fbbf24; letter-spacing: 3px; margin-bottom: 8px; }
+  .value-number {
+    font-size: 52px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+    line-height: 1.1;
+  }
+  .reset-note {
+    font-size: 12px;
+    color: #94a3b8;
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .input-row { display: flex; gap: 10px; }
+  input {
+    flex: 1;
+    min-width: 0;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input:focus { border-color: #f6821f; }
+  input::placeholder { color: #64748b; }
+  button {
+    padding: 12px 22px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #f6821f, #f97316);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s, opacity 0.2s;
+    white-space: nowrap;
+  }
+  button:hover { transform: translateY(-1px); opacity: 0.92; }
+  button:active { transform: translateY(0); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status {
+    margin-top: 16px;
+    font-size: 13px;
+    min-height: 18px;
+    text-align: center;
+  }
+  #status.ok { color: #4ade80; }
+  #status.err { color: #f87171; }
+  footer {
+    margin-top: 22px;
+    text-align: center;
+    font-size: 12px;
+    color: #64748b;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>云端计数器</h1>
+    <div class="subtitle">GitHub Pages · Cloudflare Workers KV</div>
+
+    <div class="value-box">
+      <div class="value-label">当前值</div>
+      <div class="value-number" id="current-value">--</div>
+    </div>
+
+    <div class="reset-note">每天北京时间 04:00 自动清零</div>
+
+    <div class="input-row">
+      <input type="number" id="value-input" step="any" placeholder="输入新值（数字）" />
+      <button id="set-btn">更新</button>
+    </div>
+
+    <div id="status"></div>
+
+    <footer>数据存储于 Cloudflare KV</footer>
+  </div>
+
+  <script>
+    // TODO: 部署 Worker 后，把这里替换成你的 Worker 地址，
+    // 例如 https://daily-reset-counter.你的用户名.workers.dev
+    const WORKER_URL = 'https://REPLACE_WITH_YOUR_WORKER.workers.dev';
+
+    const valueEl = document.getElementById('current-value');
+    const inputEl = document.getElementById('value-input');
+    const btnEl = document.getElementById('set-btn');
+    const statusEl = document.getElementById('status');
+
+    function showStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = type || '';
+    }
+
+    async function loadValue() {
+      showStatus('加载中…');
+      try {
+        const res = await fetch(WORKER_URL + '/api/value');
+        const data = await res.json();
+        valueEl.textContent = formatNumber(data.value);
+        showStatus('已同步云端数据', 'ok');
+      } catch (e) {
+        showStatus('加载失败：请检查 WORKER_URL 配置', 'err');
+      }
+    }
+
+    async function updateValue() {
+      const raw = inputEl.value.trim();
+      const value = Number(raw);
+      if (raw === '' || !Number.isFinite(value)) {
+        showStatus('请输入有效数字', 'err');
+        return;
+      }
+      btnEl.disabled = true;
+      showStatus('提交中…');
+      try {
+        const res = await fetch(WORKER_URL + '/api/value', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '请求失败');
+        valueEl.textContent = formatNumber(data.value);
+        inputEl.value = '';
+        showStatus('更新成功', 'ok');
+      } catch (e) {
+        showStatus('更新失败：' + e.message, 'err');
+      } finally {
+        btnEl.disabled = false;
+      }
+    }
+
+    function formatNumber(n) {
+      return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+    }
+
+    btnEl.addEventListener('click', updateValue);
+    inputEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') updateValue();
+    });
+
+    loadValue();
+  </script>
+</body>
+</html>
