@@ -1,0 +1,17 @@
+# Cloudflare Worker 配置文件
+# 使用前提：已安装 wrangler（npm install -g wrangler）并执行 wrangler login
+
+name = "daily-reset-counter"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# KV 命名空间绑定（部署前先替换 id 为你的 Namespace ID）
+# 创建命令：wrangler kv namespace create MY_KV
+[[kv_namespaces]]
+binding = "MY_KV"
+id = "2990b75f00f243d98c5db6063511d768"
+
+# Cron 定时清零：Cron 触发器使用 UTC 时区
+# 20:00 UTC = 次日 04:00 北京时间
+[triggers]
+crons = ["0 20 * * *"]

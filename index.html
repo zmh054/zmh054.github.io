@@ -120,8 +120,6 @@
   </div>
 
   <script>
-    // TODO: 部署 Worker 后，把这里替换成你的 Worker 地址，
-    // 例如 https://daily-reset-counter.你的用户名.workers.dev
     const WORKER_URL = 'https://daily-reset-counter.3308154568.workers.dev';
 
     const valueEl = document.getElementById('current-value');
@@ -142,7 +140,7 @@
         valueEl.textContent = formatNumber(data.value);
         showStatus('已同步云端数据', 'ok');
       } catch (e) {
-        showStatus('加载失败：请检查 WORKER_URL 配置', 'err');
+        showStatus('加载失败：' + (e.message || '未知错误'), 'err');
       }
     }
 
