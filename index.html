@@ -163,7 +163,6 @@
 
     var RAW_URL = 'https://raw.githubusercontent.com/' + OWNER + '/' + REPO + '/main/' + FILE_PATH;
     var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE_PATH;
-    var JSDELIVR_URL = 'https://cdn.jsdelivr.net/gh/' + OWNER + '/' + REPO + '@main/' + FILE_PATH;
     var LS_KEY = 'cloud-counter-cache';
     var BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
@@ -188,8 +187,9 @@
       dot.className = 'dot' + (ok ? '' : ' off');
     }
 
-    function beijingDate() {
-      var d = new Date(Date.now() + BEIJING_OFFSET_MS);
+    // 业务日：以北京时间 4:00 为日界（每天 4:00 清零，而非午夜）
+    function businessDate() {
+      var d = new Date(Date.now() + BEIJING_OFFSET_MS - 4 * 60 * 60 * 1000);
       return d.toISOString().slice(0, 10);
     }
 
@@ -212,20 +212,20 @@
         {
           name: 'GitHub API',
           url: API_URL,
+          headers: GITHUB_TOKEN ? { 'Authorization': 'Bearer ' + GITHUB_TOKEN } : undefined,
           parse: async function (r) {
             var j = await r.json();
             if (!j || !j.content) throw new Error('bad api resp');
             return JSON.parse(atob(j.content));
           }
         },
-        { name: 'jsDelivr', url: JSDELIVR_URL, parse: function (r) { return r.json(); } },
       ];
 
       var lastErr = null;
       for (var i = 0; i < attempts.length; i++) {
         var a = attempts[i];
         try {
-          var res = await fetchWithTimeout(a.url, 10000);
+          var res = await fetchWithTimeout(a.url, 10000, a.headers ? { headers: a.headers } : undefined);
           if (!res.ok) throw new Error('HTTP ' + res.status);
           var data = await a.parse(res);
           if (!data || typeof data.value !== 'number') throw new Error('bad data');
@@ -242,7 +242,7 @@
       if (!GITHUB_TOKEN) {
         throw new Error('尚未配置 GitHub Token');
       }
-      var body = JSON.stringify({ value: value, date: beijingDate() });
+      var body = JSON.stringify({ value: value, date: businessDate() });
       var sha = null;
 
       for (var attempt = 0; attempt < 3; attempt++) {
@@ -296,7 +296,7 @@
       try {
         var data = await readValue();
         // 惰性清零：若存储日期不是北京今天，展示 0 并尽力回写
-        if (data.date !== beijingDate()) {
+        if (data.date !== businessDate()) {
           data.value = 0;
           writeValue(0).catch(function () {});
         }
@@ -333,7 +333,7 @@
       try {
         var data = await writeValue(value);
         valueEl.textContent = formatNumber(data.value);
-        localStorage.setItem(LS_KEY, JSON.stringify({ value: value, date: beijingDate() }));
+        localStorage.setItem(LS_KEY, JSON.stringify({ value: value, date: businessDate() }));
         inputEl.value = '';
         showStatus('更新成功', 'ok');
       } catch (e) {
