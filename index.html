@@ -89,6 +89,21 @@
   button:hover { transform: translateY(-1px); opacity: 0.92; }
   button:active { transform: translateY(0); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  .token-panel {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .link {
+    cursor: pointer;
+    text-decoration: underline;
+    color: #94a3b8;
+  }
+  .link:hover { color: #4ade80; }
   #status {
     margin-top: 16px;
     font-size: 13px;
@@ -123,9 +138,14 @@
       <button id="set-btn">更新</button>
     </div>
 
+    <div class="token-panel" id="token-panel" hidden>
+      <input type="password" id="token-input" placeholder="粘贴 Fine-grained PAT（github_pat_ 开头）" />
+      <button id="token-save-btn" class="ghost">保存</button>
+    </div>
+
     <div id="status"></div>
 
-    <footer>数据存储于 GitHub 仓库</footer>
+    <footer>数据存储于 GitHub 仓库 · <span id="token-link" class="link">令牌设置</span></footer>
   </div>
 
   <script>
@@ -134,11 +154,12 @@
     var REPO = 'zmh054.github.io';
     var FILE_PATH = 'data/counter.json';
 
-    // 在 GitHub 生成 fine-grained PAT 后填入：
-    // Settings -> Developer settings -> Fine-grained tokens
+    // 令牌从浏览器 localStorage 读取，不提交到仓库（避免 GitHub 推送保护拦截）。
+    // 首次使用：点击页面底部"令牌设置"，粘贴 GitHub 生成的 fine-grained PAT。
+    // 生成方式：Settings -> Developer settings -> Fine-grained tokens
     //   Repository access: Only select repositories -> zmh054/zmh054.github.io
     //   Permissions -> Repository permissions -> Contents: Read and write
-    var GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN';
+    var GITHUB_TOKEN = localStorage.getItem('gh_token') || '';
 
     var RAW_URL = 'https://raw.githubusercontent.com/' + OWNER + '/' + REPO + '/main/' + FILE_PATH;
     var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE_PATH;
@@ -151,6 +172,10 @@
     var btnEl = document.getElementById('set-btn');
     var statusEl = document.getElementById('status');
     var sourceEl = document.getElementById('source-text');
+    var tokenPanel = document.getElementById('token-panel');
+    var tokenInput = document.getElementById('token-input');
+    var tokenSaveBtn = document.getElementById('token-save-btn');
+    var tokenLink = document.getElementById('token-link');
 
     function showStatus(msg, type) {
       statusEl.textContent = msg;
@@ -214,7 +239,7 @@
 
     // ============ 写入（GitHub Contents API） ============
     async function writeValue(value) {
-      if (!GITHUB_TOKEN || GITHUB_TOKEN.indexOf('YOUR_GITHUB_TOKEN') === 0) {
+      if (!GITHUB_TOKEN) {
         throw new Error('尚未配置 GitHub Token');
       }
       var body = JSON.stringify({ value: value, date: beijingDate() });
@@ -297,8 +322,10 @@
         showStatus('请输入有效数字', 'err');
         return;
       }
-      if (!GITHUB_TOKEN || GITHUB_TOKEN.indexOf('YOUR_GITHUB_TOKEN') === 0) {
-        showStatus('请先在页面源码中配置 GITHUB_TOKEN', 'err');
+      if (!GITHUB_TOKEN) {
+        tokenPanel.hidden = false;
+        tokenInput.focus();
+        showStatus('请先设置 GitHub 令牌（见底部"令牌设置"）', 'err');
         return;
       }
       btnEl.disabled = true;
@@ -323,6 +350,21 @@
     btnEl.addEventListener('click', updateValue);
     inputEl.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') updateValue();
+    });
+
+    tokenLink.addEventListener('click', function () {
+      tokenPanel.hidden = !tokenPanel.hidden;
+      if (!tokenPanel.hidden) tokenInput.focus();
+    });
+
+    tokenSaveBtn.addEventListener('click', function () {
+      var v = tokenInput.value.trim();
+      if (!v) { showStatus('令牌不能为空', 'err'); return; }
+      localStorage.setItem('gh_token', v);
+      GITHUB_TOKEN = v;
+      tokenInput.value = '';
+      tokenPanel.hidden = true;
+      showStatus('令牌已保存（仅存于本浏览器）', 'ok');
     });
 
     loadValue();
