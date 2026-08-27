@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>云端计数器 · Cloudflare KV</title>
+<title>云端计数器 · GitHub</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -33,11 +33,11 @@
     text-align: center;
     padding: 28px 16px;
     border-radius: 16px;
-    background: rgba(246, 130, 31, 0.12);
-    border: 1px dashed rgba(246, 130, 31, 0.4);
-    margin-bottom: 20px;
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px dashed rgba(34, 197, 94, 0.4);
+    margin-bottom: 12px;
   }
-  .value-label { font-size: 13px; color: #fbbf24; letter-spacing: 3px; margin-bottom: 8px; }
+  .value-label { font-size: 13px; color: #4ade80; letter-spacing: 3px; margin-bottom: 8px; }
   .value-number {
     font-size: 52px;
     font-weight: 800;
@@ -45,6 +45,14 @@
     color: #fff;
     line-height: 1.1;
   }
+  .source-line {
+    font-size: 12px;
+    color: #94a3b8;
+    text-align: center;
+    margin-bottom: 16px;
+  }
+  .source-line .dot { color: #4ade80; }
+  .source-line .dot.off { color: #f87171; }
   .reset-note {
     font-size: 12px;
     color: #94a3b8;
@@ -64,13 +72,13 @@
     outline: none;
     transition: border-color 0.2s;
   }
-  input:focus { border-color: #f6821f; }
+  input:focus { border-color: #22c55e; }
   input::placeholder { color: #64748b; }
   button {
     padding: 12px 22px;
     border: none;
     border-radius: 10px;
-    background: linear-gradient(135deg, #f6821f, #f97316);
+    background: linear-gradient(135deg, #22c55e, #16a34a);
     color: #fff;
     font-size: 15px;
     font-weight: 600;
@@ -100,13 +108,14 @@
 <body>
   <div class="card">
     <h1>云端计数器</h1>
-    <div class="subtitle">GitHub Pages · Cloudflare Workers KV</div>
+    <div class="subtitle">GitHub Pages · GitHub API + Actions</div>
 
     <div class="value-box">
       <div class="value-label">当前值</div>
       <div class="value-number" id="current-value">--</div>
     </div>
 
+    <div class="source-line" id="source-line"><span class="dot off">●</span> <span id="source-text">连接中…</span></div>
     <div class="reset-note">每天北京时间 04:00 自动清零</div>
 
     <div class="input-row">
@@ -116,52 +125,188 @@
 
     <div id="status"></div>
 
-    <footer>数据存储于 Cloudflare KV</footer>
+    <footer>数据存储于 GitHub 仓库</footer>
   </div>
 
   <script>
-    const WORKER_URL = 'https://daily-reset-counter.3308154568.workers.dev';
+    // ============ 配置 ============
+    var OWNER = 'zmh054';
+    var REPO = 'zmh054.github.io';
+    var FILE_PATH = 'data/counter.json';
 
-    const valueEl = document.getElementById('current-value');
-    const inputEl = document.getElementById('value-input');
-    const btnEl = document.getElementById('set-btn');
-    const statusEl = document.getElementById('status');
+    // 在 GitHub 生成 fine-grained PAT 后填入：
+    // Settings -> Developer settings -> Fine-grained tokens
+    //   Repository access: Only select repositories -> zmh054/zmh054.github.io
+    //   Permissions -> Repository permissions -> Contents: Read and write
+    var GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN';
+
+    var RAW_URL = 'https://raw.githubusercontent.com/' + OWNER + '/' + REPO + '/main/' + FILE_PATH;
+    var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE_PATH;
+    var JSDELIVR_URL = 'https://cdn.jsdelivr.net/gh/' + OWNER + '/' + REPO + '@main/' + FILE_PATH;
+    var LS_KEY = 'cloud-counter-cache';
+    var BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+    var valueEl = document.getElementById('current-value');
+    var inputEl = document.getElementById('value-input');
+    var btnEl = document.getElementById('set-btn');
+    var statusEl = document.getElementById('status');
+    var sourceEl = document.getElementById('source-text');
 
     function showStatus(msg, type) {
       statusEl.textContent = msg;
       statusEl.className = type || '';
     }
 
+    function setSource(text, ok) {
+      sourceEl.textContent = text;
+      var dot = document.querySelector('#source-line .dot');
+      dot.className = 'dot' + (ok ? '' : ' off');
+    }
+
+    function beijingDate() {
+      var d = new Date(Date.now() + BEIJING_OFFSET_MS);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function toBase64(str) {
+      return btoa(unescape(encodeURIComponent(str)));
+    }
+
+    function fetchWithTimeout(url, ms, init) {
+      var ctrl = new AbortController();
+      var timer = setTimeout(function () { ctrl.abort(); }, ms || 10000);
+      return fetch(url, Object.assign({ signal: ctrl.signal }, init || {}))
+        .then(function (r) { clearTimeout(timer); return r; })
+        .catch(function (e) { clearTimeout(timer); throw e; });
+    }
+
+    // ============ 读取（多路径回退） ============
+    async function readValue() {
+      var attempts = [
+        { name: 'GitHub Raw', url: RAW_URL, parse: function (r) { return r.json(); } },
+        {
+          name: 'GitHub API',
+          url: API_URL,
+          parse: async function (r) {
+            var j = await r.json();
+            if (!j || !j.content) throw new Error('bad api resp');
+            return JSON.parse(atob(j.content));
+          }
+        },
+        { name: 'jsDelivr', url: JSDELIVR_URL, parse: function (r) { return r.json(); } },
+      ];
+
+      var lastErr = null;
+      for (var i = 0; i < attempts.length; i++) {
+        var a = attempts[i];
+        try {
+          var res = await fetchWithTimeout(a.url, 10000);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          var data = await a.parse(res);
+          if (!data || typeof data.value !== 'number') throw new Error('bad data');
+          return { value: data.value, date: data.date, source: a.name };
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error('所有读取路径均失败');
+    }
+
+    // ============ 写入（GitHub Contents API） ============
+    async function writeValue(value) {
+      if (!GITHUB_TOKEN || GITHUB_TOKEN.indexOf('YOUR_GITHUB_TOKEN') === 0) {
+        throw new Error('尚未配置 GitHub Token');
+      }
+      var body = JSON.stringify({ value: value, date: beijingDate() });
+      var sha = null;
+
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          // 先取当前文件 sha
+          var meta = await fetchWithTimeout(API_URL, 10000);
+          if (meta.ok) {
+            var m = await meta.json();
+            if (m && m.sha) sha = m.sha;
+          }
+
+          var res = await fetchWithTimeout(API_URL, 15000, {
+            method: 'PUT',
+            headers: {
+              'Authorization': 'Bearer ' + GITHUB_TOKEN,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              message: 'update counter',
+              content: toBase64(body),
+              sha: sha
+            })
+          });
+
+          if (res.status === 409) { continue; } // sha 冲突，重试
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return { value: value };
+        } catch (e) {
+          if (attempt === 2) throw e;
+        }
+      }
+      throw new Error('写入冲突，重试仍失败');
+    }
+
+    // ============ 页面逻辑 ============
+    function renderValue(v, fromCache) {
+      valueEl.textContent = formatNumber(v.value);
+      var label = fromCache ? '（缓存）' : '';
+      setSource('数据源：GitHub' + label, true);
+    }
+
     async function loadValue() {
       showStatus('加载中…');
+      var cache = null;
       try {
-        const res = await fetch(WORKER_URL + '/api/value');
-        const data = await res.json();
-        valueEl.textContent = formatNumber(data.value);
-        showStatus('已同步云端数据', 'ok');
+        cache = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+      } catch (e) {}
+
+      try {
+        var data = await readValue();
+        // 惰性清零：若存储日期不是北京今天，展示 0 并尽力回写
+        if (data.date !== beijingDate()) {
+          data.value = 0;
+          writeValue(0).catch(function () {});
+        }
+        localStorage.setItem(LS_KEY, JSON.stringify(data));
+        renderValue(data, false);
+        showStatus('已同步（' + data.source + '）', 'ok');
       } catch (e) {
-        showStatus('加载失败：' + (e.message || '未知错误'), 'err');
+        if (cache && typeof cache.value === 'number') {
+          renderValue(cache, true);
+          showStatus('网络不可达，已显示上次缓存', 'err');
+        } else {
+          valueEl.textContent = '--';
+          setSource('数据源：不可达', false);
+          showStatus('加载失败：所有读取路径均不可达', 'err');
+        }
       }
     }
 
     async function updateValue() {
-      const raw = inputEl.value.trim();
-      const value = Number(raw);
+      var raw = inputEl.value.trim();
+      var value = Number(raw);
       if (raw === '' || !Number.isFinite(value)) {
         showStatus('请输入有效数字', 'err');
+        return;
+      }
+      if (!GITHUB_TOKEN || GITHUB_TOKEN.indexOf('YOUR_GITHUB_TOKEN') === 0) {
+        showStatus('请先在页面源码中配置 GITHUB_TOKEN', 'err');
         return;
       }
       btnEl.disabled = true;
       showStatus('提交中…');
       try {
-        const res = await fetch(WORKER_URL + '/api/value', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '请求失败');
+        var data = await writeValue(value);
         valueEl.textContent = formatNumber(data.value);
+        localStorage.setItem(LS_KEY, JSON.stringify({ value: value, date: beijingDate() }));
         inputEl.value = '';
         showStatus('更新成功', 'ok');
       } catch (e) {
