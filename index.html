@@ -45,6 +45,11 @@
     color: #fff;
     line-height: 1.1;
   }
+  .updated-time {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-top: 10px;
+  }
   .source-line {
     font-size: 12px;
     color: #94a3b8;
@@ -88,7 +93,7 @@
   }
   button:hover { transform: translateY(-1px); opacity: 0.92; }
   button:active { transform: translateY(0); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   button.ghost {
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
@@ -128,6 +133,7 @@
     <div class="value-box">
       <div class="value-label">当前值</div>
       <div class="value-number" id="current-value">--</div>
+      <div class="updated-time" id="updated-time">尚未更新</div>
     </div>
 
     <div class="source-line" id="source-line"><span class="dot off">●</span> <span id="source-text">连接中…</span></div>
@@ -154,19 +160,19 @@
     var REPO = 'zmh054.github.io';
     var FILE_PATH = 'data/counter.json';
 
-    // 令牌从浏览器 localStorage 读取，不提交到仓库（避免 GitHub 推送保护拦截）。
-    // 首次使用：点击页面底部"令牌设置"，粘贴 GitHub 生成的 fine-grained PAT。
-    // 生成方式：Settings -> Developer settings -> Fine-grained tokens
-    //   Repository access: Only select repositories -> zmh054/zmh054.github.io
-    //   Permissions -> Repository permissions -> Contents: Read and write
+    // 令牌从浏览器 localStorage 读取，不提交到仓库。
+    // 首次使用：点击页面底部"令牌设置"，粘贴 GitHub fine-grained PAT。
     var GITHUB_TOKEN = localStorage.getItem('gh_token') || '';
 
     var RAW_URL = 'https://raw.githubusercontent.com/' + OWNER + '/' + REPO + '/main/' + FILE_PATH;
     var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE_PATH;
     var LS_KEY = 'cloud-counter-cache';
     var BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+    var UPDATE_COOLDOWN_MS = 5 * 60 * 1000;
 
+    // ============ DOM ============
     var valueEl = document.getElementById('current-value');
+    var updatedTimeEl = document.getElementById('updated-time');
     var inputEl = document.getElementById('value-input');
     var btnEl = document.getElementById('set-btn');
     var statusEl = document.getElementById('status');
@@ -176,6 +182,11 @@
     var tokenSaveBtn = document.getElementById('token-save-btn');
     var tokenLink = document.getElementById('token-link');
 
+    // ============ 状态 ============
+    var lastUpdatedAt = null;
+    var cooldownTimer = null;
+
+    // ============ 工具函数 ============
     function showStatus(msg, type) {
       statusEl.textContent = msg;
       statusEl.className = type || '';
@@ -187,7 +198,7 @@
       dot.className = 'dot' + (ok ? '' : ' off');
     }
 
-    // 业务日：以北京时间 4:00 为日界（每天 4:00 清零，而非午夜）
+    // 业务日：以北京时间 4:00 为日界
     function businessDate() {
       var d = new Date(Date.now() + BEIJING_OFFSET_MS - 4 * 60 * 60 * 1000);
       return d.toISOString().slice(0, 10);
@@ -195,6 +206,50 @@
 
     function toBase64(str) {
       return btoa(unescape(encodeURIComponent(str)));
+    }
+
+    function formatNumber(n) {
+      return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+    }
+
+    function formatTime(iso) {
+      if (!iso) return '尚未更新';
+      var d = new Date(iso);
+      var bj = new Date(d.getTime() + BEIJING_OFFSET_MS);
+      var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+      return bj.getUTCFullYear() + '-' + pad(bj.getUTCMonth() + 1) + '-' + pad(bj.getUTCDate()) +
+        ' ' + pad(bj.getUTCHours()) + ':' + pad(bj.getUTCMinutes()) + ':' + pad(bj.getUTCSeconds());
+    }
+
+    function getCooldownRemaining(updatedAt) {
+      if (!updatedAt) return 0;
+      var elapsed = Date.now() - new Date(updatedAt).getTime();
+      var remaining = UPDATE_COOLDOWN_MS - elapsed;
+      return remaining > 0 ? remaining : 0;
+    }
+
+    function startCooldownCountdown(updatedAt) {
+      if (cooldownTimer) { clearInterval(cooldownTimer); cooldownTimer = null; }
+      if (!updatedAt) { btnEl.disabled = false; return; }
+      var remaining = getCooldownRemaining(updatedAt);
+      if (remaining <= 0) { btnEl.disabled = false; return; }
+      function tick() {
+        remaining = getCooldownRemaining(updatedAt);
+        if (remaining <= 0) {
+          clearInterval(cooldownTimer);
+          cooldownTimer = null;
+          btnEl.disabled = false;
+          showStatus('冷却已结束，可以更新', 'ok');
+          return;
+        }
+        btnEl.disabled = true;
+        var mins = Math.floor(remaining / 60000);
+        var secs = Math.floor((remaining % 60000) / 1000);
+        var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+        showStatus('更新冷却中：剩余 ' + mins + ':' + pad(secs), 'err');
+      }
+      tick();
+      cooldownTimer = setInterval(tick, 1000);
     }
 
     function fetchWithTimeout(url, ms, init) {
@@ -205,20 +260,28 @@
         .catch(function (e) { clearTimeout(timer); throw e; });
     }
 
-    // ============ 读取（多路径回退） ============
+    function authHeaders() {
+      return {
+        'Authorization': 'Bearer ' + GITHUB_TOKEN,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      };
+    }
+
+    // ============ 读取（API 优先，Raw 兜底） ============
     async function readValue() {
       var attempts = [
-        { name: 'GitHub Raw', url: RAW_URL, parse: function (r) { return r.json(); } },
         {
           name: 'GitHub API',
           url: API_URL,
-          headers: GITHUB_TOKEN ? { 'Authorization': 'Bearer ' + GITHUB_TOKEN } : undefined,
+          headers: GITHUB_TOKEN ? authHeaders() : undefined,
           parse: async function (r) {
             var j = await r.json();
             if (!j || !j.content) throw new Error('bad api resp');
             return JSON.parse(atob(j.content));
           }
         },
+        { name: 'GitHub Raw', url: RAW_URL, headers: undefined, parse: function (r) { return r.json(); } },
       ];
 
       var lastErr = null;
@@ -229,7 +292,7 @@
           if (!res.ok) throw new Error('HTTP ' + res.status);
           var data = await a.parse(res);
           if (!data || typeof data.value !== 'number') throw new Error('bad data');
-          return { value: data.value, date: data.date, source: a.name };
+          return { value: data.value, date: data.date, updatedAt: data.updatedAt, source: a.name };
         } catch (e) {
           lastErr = e;
         }
@@ -242,13 +305,13 @@
       if (!GITHUB_TOKEN) {
         throw new Error('尚未配置 GitHub Token');
       }
-      var body = JSON.stringify({ value: value, date: businessDate() });
+      var now = new Date().toISOString();
+      var body = JSON.stringify({ value: value, date: businessDate(), updatedAt: now });
       var sha = null;
 
       for (var attempt = 0; attempt < 3; attempt++) {
         try {
-          // 先取当前文件 sha
-          var meta = await fetchWithTimeout(API_URL, 10000);
+          var meta = await fetchWithTimeout(API_URL, 10000, { headers: authHeaders() });
           if (meta.ok) {
             var m = await meta.json();
             if (m && m.sha) sha = m.sha;
@@ -256,12 +319,7 @@
 
           var res = await fetchWithTimeout(API_URL, 15000, {
             method: 'PUT',
-            headers: {
-              'Authorization': 'Bearer ' + GITHUB_TOKEN,
-              'Accept': 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
-              'Content-Type': 'application/json'
-            },
+            headers: authHeaders(),
             body: JSON.stringify({
               message: 'update counter',
               content: toBase64(body),
@@ -269,9 +327,9 @@
             })
           });
 
-          if (res.status === 409) { continue; } // sha 冲突，重试
+          if (res.status === 409) { continue; }
           if (!res.ok) throw new Error('HTTP ' + res.status);
-          return { value: value };
+          return { value: value, updatedAt: now };
         } catch (e) {
           if (attempt === 2) throw e;
         }
@@ -282,8 +340,11 @@
     // ============ 页面逻辑 ============
     function renderValue(v, fromCache) {
       valueEl.textContent = formatNumber(v.value);
+      updatedTimeEl.textContent = '上次修改：' + formatTime(v.updatedAt);
       var label = fromCache ? '（缓存）' : '';
       setSource('数据源：GitHub' + label, true);
+      lastUpdatedAt = v.updatedAt || null;
+      startCooldownCountdown(lastUpdatedAt);
     }
 
     async function loadValue() {
@@ -295,21 +356,25 @@
 
       try {
         var data = await readValue();
-        // 惰性清零：若存储日期不是北京今天，展示 0 并尽力回写
         if (data.date !== businessDate()) {
           data.value = 0;
+          data.updatedAt = new Date().toISOString();
           writeValue(0).catch(function () {});
         }
         localStorage.setItem(LS_KEY, JSON.stringify(data));
         renderValue(data, false);
-        showStatus('已同步（' + data.source + '）', 'ok');
+        if (!getCooldownRemaining(lastUpdatedAt)) {
+          showStatus('已同步（' + data.source + '）', 'ok');
+        }
       } catch (e) {
         if (cache && typeof cache.value === 'number') {
           renderValue(cache, true);
           showStatus('网络不可达，已显示上次缓存', 'err');
         } else {
           valueEl.textContent = '--';
+          updatedTimeEl.textContent = '尚未更新';
           setSource('数据源：不可达', false);
+          startCooldownCountdown(null);
           showStatus('加载失败：所有读取路径均不可达', 'err');
         }
       }
@@ -328,25 +393,29 @@
         showStatus('请先设置 GitHub 令牌（见底部"令牌设置"）', 'err');
         return;
       }
+      var remaining = getCooldownRemaining(lastUpdatedAt);
+      if (remaining > 0) {
+        startCooldownCountdown(lastUpdatedAt);
+        return;
+      }
       btnEl.disabled = true;
       showStatus('提交中…');
       try {
         var data = await writeValue(value);
         valueEl.textContent = formatNumber(data.value);
-        localStorage.setItem(LS_KEY, JSON.stringify({ value: value, date: businessDate() }));
+        updatedTimeEl.textContent = '上次修改：' + formatTime(data.updatedAt);
+        lastUpdatedAt = data.updatedAt;
+        localStorage.setItem(LS_KEY, JSON.stringify({ value: value, date: businessDate(), updatedAt: data.updatedAt }));
         inputEl.value = '';
         showStatus('更新成功', 'ok');
+        startCooldownCountdown(data.updatedAt);
       } catch (e) {
         showStatus('更新失败：' + e.message, 'err');
-      } finally {
         btnEl.disabled = false;
       }
     }
 
-    function formatNumber(n) {
-      return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 6 });
-    }
-
+    // ============ 事件监听 ============
     btnEl.addEventListener('click', updateValue);
     inputEl.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') updateValue();
